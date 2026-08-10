@@ -1,0 +1,6 @@
+duckdb
+joblib
+numpy
+scikit-learn
+torch
+torchvision

@@ -1,0 +1,22 @@
+# Python virtual environment
+venv/
+
+# Downloaded datasets (large, auto re-downloadable via download=True)
+data/
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Trained model weights (large binary, regenerate by re-running training)
+*.pt
+*.pth
+
+*.csv
+
+*.joblib
+
+# OS
+.DS_Store
+*.jsonl
+*.swp
