@@ -31,6 +31,11 @@ SUM_TOTAL_TEMPLATES = [
     "Give me the sum total of payment amounts.",
     "What is the total dollar value of all payments combined?",
     "How much money was paid out in total dollars?",
+    "How much money changed hands in total?",
+    "Tell me the overall dollar amount paid.",
+    "What's the total spend across every payment?",
+    "I need the combined total of every payment made.",
+    "Everything added up, how much was paid?",
 ]
 
 COUNT_TOTAL_TEMPLATES = [
@@ -50,6 +55,10 @@ COUNT_TOTAL_TEMPLATES = [
     "What's the number of payments recorded?",
     "How many entries are in the payments dataset?",
     "Count how many payments exist.",
+    "Tell me the total number of transactions logged.",
+    "What's the payment count across the board?",
+    "I want to know how many payments happened in total.",
+    "Just how many payment entries are we talking about?",
 ]
 
 AVG_TOTAL_TEMPLATES = [
@@ -65,6 +74,9 @@ AVG_TOTAL_TEMPLATES = [
     "What's the average dollar amount per transaction?",
     "What is the average size of a payment?",
     "On average, what does a payment amount to?",
+    "What's a typical payment worth?",
+    "Roughly how much does each payment come out to on average?",
+    "What's the mean transaction size across everything?",
 ]
 
 STATE_FIELD = "Recipient_State"
@@ -161,6 +173,17 @@ def build_dataset(vocab, target_size, rng):
             }
         )
 
+    def add_multi(question, intent, entities):
+        examples.append(
+            {
+                "question": question,
+                "intent": intent,
+                "entities": [
+                    {"entity_type": t, "entity_value": v} for t, v in entities
+                ],
+            }
+        )
+
     state_sample = sample(vocab["STATE"], min(50, len(vocab["STATE"])), rng)
     nature_sample = sample(vocab["NATURE"], min(16, len(vocab["NATURE"])), rng)
     category_sample = sample(vocab["CATEGORY"], min(60, len(vocab["CATEGORY"])), rng)
@@ -176,15 +199,26 @@ def build_dataset(vocab, target_size, rng):
                 "Total amount of payments in {v}.",
                 "How much money went to recipients in {v}?",
                 "Sum the payments made in {v}.",
+                "What's the overall dollar amount paid out in {v}?",
+                "Add up every payment made to {v}.",
+                "I'd like the combined total for {v}.",
+                "{v} recipients received how much in total?",
             ],
             "COUNT_BY_STATE": [
                 "How many payments were made in {v}?",
                 "Count the number of payments in {v}.",
                 "How many payment records are there for {v}?",
+                "What's the number of payments in {v}?",
+                "Tell me the count of payments made in {v}.",
+                "How many transactions happened in {v}?",
+                "{v} had how many payments made to it?",
             ],
             "AVG_BY_STATE": [
                 "What is the average payment amount in {v}?",
                 "Average payment amount for recipients in {v}.",
+                "What's the typical payment size in {v}?",
+                "On average, how much is a payment in {v} worth?",
+                "What's the mean payment amount for {v}?",
             ],
             "SIMILAR_STATES_TO": [
                 "Which state has similar payment types to {v}?",
@@ -193,6 +227,7 @@ def build_dataset(vocab, target_size, rng):
                 "What state is most like {v} based on payment nature?",
                 "Which other states resemble {v}'s payment breakdown?",
                 "Show me states similar to {v}.",
+                "What states behave like {v} payment-wise?",
             ],
         },
         "NATURE": {
@@ -200,15 +235,22 @@ def build_dataset(vocab, target_size, rng):
                 "What is the total amount paid for {v}?",
                 "Total payments categorized as {v}.",
                 "Sum of all {v} payments.",
+                "How much money went toward {v}?",
+                "What's the combined dollar amount for {v} payments?",
+                "Add up all the {v} payments.",
             ],
             "COUNT_BY_NATURE": [
                 "How many payments are there for {v}?",
                 "Count payments of nature {v}.",
                 "How many {v} payments were made?",
+                "What's the number of {v} payments?",
+                "Tell me how many times {v} was the payment type.",
             ],
             "AVG_BY_NATURE": [
                 "What is the average payment amount for {v}?",
                 "Average amount for {v} payments.",
+                "What's the typical size of a {v} payment?",
+                "On average, how much is a {v} payment worth?",
             ],
         },
         "CATEGORY": {
@@ -216,15 +258,21 @@ def build_dataset(vocab, target_size, rng):
                 "What is the total amount paid for {v}?",
                 "Total payments for the {v} category.",
                 "Sum of payments related to {v}.",
+                "How much was spent on {v}?",
+                "What's the combined total for the {v} category?",
             ],
             "COUNT_BY_CATEGORY": [
                 "How many payments are there for {v}?",
                 "How many payments were for {v}?",
                 "Count the payments in the {v} category.",
+                "What's the number of payments tied to {v}?",
+                "Tell me the payment count for {v}.",
             ],
             "AVG_BY_CATEGORY": [
                 "What is the average payment for {v}?",
                 "Average payment amount for {v} related payments.",
+                "What's the typical payment size for {v}?",
+                "On average, how much is a {v} payment?",
             ],
         },
         "COMPANY": {
@@ -232,14 +280,21 @@ def build_dataset(vocab, target_size, rng):
                 "How much did {v} pay in total?",
                 "What is the total amount paid by {v}?",
                 "Sum of payments made by {v}.",
+                "What's the overall amount {v} paid out?",
+                "Add up everything {v} has paid.",
+                "{v} paid out how much in total?",
             ],
             "COUNT_BY_COMPANY": [
                 "How many payments did {v} make?",
                 "Count the payments made by {v}.",
+                "What's the number of payments from {v}?",
+                "How many times did {v} make a payment?",
             ],
             "AVG_BY_COMPANY": [
                 "What is the average payment made by {v}?",
                 "Average amount per payment from {v}.",
+                "What's the typical payment size from {v}?",
+                "On average, how much does {v} pay per transaction?",
             ],
             "SIMILAR_COMPANIES_TO": [
                 "Which company has a similar payment pattern to {v}?",
@@ -248,6 +303,7 @@ def build_dataset(vocab, target_size, rng):
                 "Which manufacturer resembles {v} in terms of payment types?",
                 "Show me companies similar to {v}.",
                 "What other companies pay similarly to {v}?",
+                "Who else pays like {v} does?",
             ],
         },
         "PROVIDER_TYPE": {
@@ -257,12 +313,14 @@ def build_dataset(vocab, target_size, rng):
                 "How much did {v}s get paid in total?",
                 "How much money did {v}s receive overall?",
                 "Sum of all payments made to {v}s.",
+                "What's the combined amount paid out to {v}s?",
             ],
             "COUNT_BY_PROVIDER_TYPE": [
                 "How many payments went to {v}s?",
                 "Count payments made to {v} recipients.",
                 "How many {v}s received payments?",
                 "How many payments were made to {v} recipients?",
+                "What's the number of payments to {v}s?",
             ],
         },
     }
@@ -282,16 +340,116 @@ def build_dataset(vocab, target_size, rng):
                 for template in templates:
                     add(template.format(v=fill_value), intent, entity_type, value)
 
+    # Two-filter combinations: smaller per-pair samples than the single-entity
+    # block above, since the number of (value_a, value_b) pairs grows fast.
+    # NATURE only has ~16 distinct values total, so cover all of them -- a
+    # partial sample would silently drop real natures (e.g. "Consulting Fee")
+    # from every two-filter combo that uses it.
+    two_filter_state_sample = sample(vocab["STATE"], min(30, len(vocab["STATE"])), rng)
+    two_filter_nature_sample = list(vocab["NATURE"])
+    two_filter_category_sample = sample(vocab["CATEGORY"], min(25, len(vocab["CATEGORY"])), rng)
+    two_filter_company_sample = sample(vocab["COMPANY"], min(30, len(vocab["COMPANY"])), rng)
+
+    two_filter_combos = [
+        # (entity_type_a, sample_a, entity_type_b, sample_b, intent, templates)
+        (
+            "STATE", two_filter_state_sample, "NATURE", two_filter_nature_sample,
+            "SUM_BY_STATE",
+            [
+                "What is the total paid in {a} for {b}?",
+                "Total {b} payments in {a}.",
+                "How much was paid in {a} for {b} payments?",
+                "Sum of {b} payments made in {a}.",
+            ],
+        ),
+        (
+            "STATE", two_filter_state_sample, "NATURE", two_filter_nature_sample,
+            "COUNT_BY_STATE",
+            [
+                "How many {b} payments were made in {a}?",
+                "Count {b} payments in {a}.",
+            ],
+        ),
+        (
+            "STATE", two_filter_state_sample, "CATEGORY", two_filter_category_sample,
+            "SUM_BY_STATE",
+            [
+                "What is the total paid in {a} for {b}?",
+                "Total payments in {a} for the {b} category.",
+            ],
+        ),
+        (
+            "COMPANY", two_filter_company_sample, "NATURE", two_filter_nature_sample,
+            "SUM_BY_COMPANY",
+            [
+                "How much did {a} pay for {b}?",
+                "Total {b} payments made by {a}.",
+                "Sum of {b} payments from {a}.",
+            ],
+        ),
+        (
+            "COMPANY", two_filter_company_sample, "STATE", two_filter_state_sample,
+            "COUNT_BY_COMPANY",
+            [
+                "How many payments did {a} make in {b}?",
+                "Count payments by {a} in {b}.",
+            ],
+        ),
+    ]
+
+    for type_a, sample_a, type_b, sample_b, intent, templates in two_filter_combos:
+        for value_a in sample_a:
+            for value_b in sample_b:
+                template = rng.choice(templates)
+                question = template.format(a=value_a, b=value_b)
+                add_multi(question, intent, [(type_a, value_a), (type_b, value_b)])
+
+    # COMPARE: two DIFFERENT values of the SAME entity type in one question,
+    # e.g. "Did NY or TX receive more total payments?" Sampled at similar
+    # scale to the two-filter combos above (pairs, not full cross product,
+    # to keep dataset size in check).
+    compare_templates = [
+        "Did {a} or {b} receive more total payments?",
+        "Which had more payments, {a} or {b}?",
+        "Compare total paid in {a} vs {b}.",
+        "Is {a} or {b} higher in total payments?",
+        "Which received more overall, {a} or {b}?",
+    ]
+    compare_configs = [
+        ("STATE", "COMPARE_BY_STATE", two_filter_state_sample, 40),
+        ("COMPANY", "COMPARE_BY_COMPANY", two_filter_company_sample, 40),
+        ("NATURE", "COMPARE_BY_NATURE", two_filter_nature_sample, 40),
+        ("CATEGORY", "COMPARE_BY_CATEGORY", two_filter_category_sample, 40),
+    ]
+    for entity_type, intent, value_pool, num_pairs in compare_configs:
+        pool = list(value_pool)
+        if len(pool) < 2:
+            continue
+        for _ in range(min(num_pairs, len(pool) * (len(pool) - 1) // 2)):
+            value_a, value_b = rng.sample(pool, 2)
+            template = rng.choice(compare_templates)
+            question = template.format(a=value_a, b=value_b)
+            add_multi(question, intent, [(entity_type, value_a), (entity_type, value_b)])
+
     groupby_templates = [
         ("Show total payments broken down by state.", "GROUP_SUM_BY_STATE"),
         ("Which state received the most total payments?", "GROUP_SUM_BY_STATE"),
         ("Group total payments by recipient state.", "GROUP_SUM_BY_STATE"),
+        ("Break down the total dollar amount by state.", "GROUP_SUM_BY_STATE"),
+        ("I want to see payments summed per state.", "GROUP_SUM_BY_STATE"),
+        ("Give me a state-by-state total.", "GROUP_SUM_BY_STATE"),
         ("Show total amount paid by nature of payment.", "GROUP_SUM_BY_NATURE"),
         ("Break down total payments by nature of payment.", "GROUP_SUM_BY_NATURE"),
+        ("Group the total dollar amount by payment nature.", "GROUP_SUM_BY_NATURE"),
+        ("How does the total spend break down by payment type?", "GROUP_SUM_BY_NATURE"),
         ("What is the average payment amount by nature of payment?", "GROUP_AVG_BY_NATURE"),
         ("Show average payment broken down by nature of payment.", "GROUP_AVG_BY_NATURE"),
+        ("Break down the average payment size by payment nature.", "GROUP_AVG_BY_NATURE"),
+        ("What's the mean payment per nature of payment?", "GROUP_AVG_BY_NATURE"),
         ("Show total payments broken down by product category.", "GROUP_SUM_BY_CATEGORY"),
         ("Break down payments by therapeutic category.", "GROUP_SUM_BY_CATEGORY"),
+        ("Group the total dollar amount by product category.", "GROUP_SUM_BY_CATEGORY"),
+        ("How does total spend break down across categories?", "GROUP_SUM_BY_CATEGORY"),
     ]
     for _ in range(120):
         q, intent = rng.choice(groupby_templates)

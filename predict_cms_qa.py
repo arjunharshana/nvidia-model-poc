@@ -58,12 +58,22 @@ SIMILARITY_INTENT_ENTITY_TYPE = {
     "SIMILAR_STATES_TO": "STATE",
 }
 
+# COMPARE_BY_* intents: compares two values of the same entity type by total
+# dollar amount (the default/most intuitive metric for "which received more").
+COMPARE_INTENT_ENTITY_TYPE = {
+    "COMPARE_BY_STATE": "STATE",
+    "COMPARE_BY_COMPANY": "COMPANY",
+    "COMPARE_BY_NATURE": "NATURE",
+    "COMPARE_BY_CATEGORY": "CATEGORY",
+}
+
 
 def load_artifacts():
     checkpoint = torch.load(MODEL_PATH, map_location="cpu", weights_only=False)
     word2idx = joblib.load(VOCAB_PATH)
     intent_encoder = joblib.load(INTENT_ENCODER_PATH)
-    entity_type_encoder = joblib.load(ENTITY_TYPE_ENCODER_PATH)
+    entity_types = joblib.load(ENTITY_TYPE_ENCODER_PATH)
+    entity_type_threshold = checkpoint.get("entity_type_threshold", 0.5)
     entity_vocab = joblib.load(ENTITY_VOCAB_PATH)
 
     model = IntentEntityModel(
@@ -72,14 +82,15 @@ def load_artifacts():
         num_entity_types=checkpoint["num_entity_types"],
         embed_dim=checkpoint["embed_dim"],
         hidden_dim=checkpoint["hidden_dim"],
+        dropout=checkpoint.get("dropout", 0.0),
     )
     model.load_state_dict(checkpoint["model_state_dict"])
     model.eval()
 
-    return model, word2idx, intent_encoder, entity_type_encoder, entity_vocab
+    return model, word2idx, intent_encoder, entity_types, entity_type_threshold, entity_vocab
 
 
-def predict_intent_and_entity_type(question, model, word2idx, intent_encoder, entity_type_encoder):
+def predict_intent_and_entity_types(question, model, word2idx, intent_encoder, entity_types, threshold):
     ids = encode_question(question, word2idx)
     tokens = torch.tensor(ids, dtype=torch.long)
     offsets = torch.tensor([0], dtype=torch.long)
@@ -88,8 +99,9 @@ def predict_intent_and_entity_type(question, model, word2idx, intent_encoder, en
         intent_logits, entity_type_logits = model(tokens, offsets)
 
     intent = intent_encoder.inverse_transform([intent_logits.argmax(dim=1).item()])[0]
-    entity_type = entity_type_encoder.inverse_transform([entity_type_logits.argmax(dim=1).item()])[0]
-    return intent, entity_type
+    probs = torch.sigmoid(entity_type_logits).squeeze(0)
+    predicted_types = [entity_types[i] for i, p in enumerate(probs) if p.item() >= threshold]
+    return intent, predicted_types
 
 
 def extract_entity_value(question, entity_type, entity_vocab):
@@ -127,23 +139,83 @@ def extract_entity_value(question, entity_type, entity_vocab):
     return best_match
 
 
+def extract_entities(question, entity_types, entity_vocab):
+    """Resolves each predicted entity_type to a value; drops types that don't
+    match any known vocabulary value in the question text. Returns a list of
+    (entity_type, entity_value) pairs, one per successfully resolved type."""
+    entities = []
+    for entity_type in entity_types:
+        value = extract_entity_value(question, entity_type, entity_vocab)
+        if value:
+            entities.append((entity_type, value))
+    return entities
+
+
+def extract_entity_values_multi(question, entity_type, entity_vocab):
+    """Like extract_entity_value, but returns every distinct matching value
+    of entity_type found in the question (not just the single best match) --
+    used for COMPARE_BY_* questions, which name two values of the same type
+    (e.g. "NY" and "TX", both STATE)."""
+    if entity_type == "NONE" or entity_type not in entity_vocab:
+        return []
+
+    q_lower = question.lower()
+    candidates = list(entity_vocab[entity_type])
+
+    alias_to_canonical = {}
+    if entity_type == "PROVIDER_TYPE":
+        for canonical, alias in entity_vocab.get("PROVIDER_TYPE_ALIASES", {}).items():
+            alias_to_canonical[alias.lower()] = canonical
+            candidates.append(alias)
+
+    matches = []
+    for candidate in candidates:
+        c_lower = candidate.lower()
+        pattern = r"(?<![a-z0-9])" + re.escape(c_lower) + r"(?![a-z0-9])"
+        if c_lower in alias_to_canonical:
+            pattern = r"(?<![a-z0-9])" + re.escape(c_lower) + r"s?(?![a-z0-9])"
+
+        if entity_type == "STATE" and len(candidate) == 2:
+            matched = re.search(r"(?<![A-Za-z0-9])" + re.escape(candidate) + r"(?![A-Za-z0-9])", question)
+        else:
+            matched = re.search(pattern, q_lower)
+
+        if matched:
+            resolved = alias_to_canonical.get(c_lower, candidate)
+            matches.append((matched.start(), len(c_lower), resolved))
+
+    # Longer matches first (so a substring alias doesn't shadow a longer
+    # match at the same position), then in the order they appear in the text.
+    matches.sort(key=lambda m: (m[0], -m[1]))
+
+    seen = set()
+    ordered = []
+    for _, _, resolved in matches:
+        if resolved not in seen:
+            seen.add(resolved)
+            ordered.append(resolved)
+    return ordered
+
+
 def _duckdb_csv_source(csv_path):
     escaped_path = os.path.abspath(csv_path).replace("'", "''")
     return f"read_csv_auto('{escaped_path}', ignore_errors=true)"
 
 
-def run_aggregation(intent, entity_type, entity_value, csv_path):
-    field = FIELD_FOR_ENTITY_TYPE.get(entity_type)
+def run_aggregation(intent, entities, csv_path):
     group_field = GROUP_BY_INTENT_FIELD.get(intent)
 
     from_clause = _duckdb_csv_source(csv_path)
     amount_expr = f'TRY_CAST("{AMOUNT_FIELD}" AS DOUBLE)'
 
-    where_clause = ""
+    conditions = []
     params = []
-    if field and entity_value:
-        where_clause = f'WHERE LOWER(TRIM("{field}")) = LOWER(?)'
-        params.append(entity_value)
+    for entity_type, entity_value in entities:
+        field = FIELD_FOR_ENTITY_TYPE.get(entity_type)
+        if field and entity_value:
+            conditions.append(f'LOWER(TRIM("{field}")) = LOWER(?)')
+            params.append(entity_value)
+    where_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
 
     if group_field:
         query = f"""
@@ -170,7 +242,7 @@ def run_aggregation(intent, entity_type, entity_value, csv_path):
     return {"sum": total, "count": count, "avg": (total / count) if count else 0.0}
 
 
-def format_answer(intent, entity_type, entity_value, result):
+def format_answer(intent, entities, result):
     if "groups" in result:
         lines = [f"Breakdown by {GROUP_BY_INTENT_FIELD[intent]}:"]
         is_avg = intent.startswith("GROUP_AVG")
@@ -180,7 +252,12 @@ def format_answer(intent, entity_type, entity_value, result):
             lines.append(f"  {key:40s} {label}=${value:,.2f}  (n={stats['count']})")
         return "\n".join(lines)
 
-    scope = f" for {entity_type.lower()}='{entity_value}'" if entity_value else ""
+    if entities:
+        filters = " and ".join(f"{t.lower()}='{v}'" for t, v in entities)
+        scope = f" for {filters}"
+    else:
+        scope = ""
+
     if intent.startswith("SUM"):
         return f"Total amount{scope}: ${result['sum']:,.2f}  (n={result['count']})"
     if intent.startswith("COUNT"):
@@ -188,6 +265,38 @@ def format_answer(intent, entity_type, entity_value, result):
     if intent.startswith("AVG"):
         return f"Average payment amount{scope}: ${result['avg']:,.2f}  (n={result['count']})"
     return str(result)
+
+
+def run_compare(entity_type, value_a, value_b, csv_path):
+    """Runs the SUM aggregate once per value and returns both results plus
+    which one is higher. Metric is always total dollar amount -- the natural
+    default for a bare "which received more" question."""
+    result_a = run_aggregation("SUM_TOTAL", [(entity_type, value_a)], csv_path)
+    result_b = run_aggregation("SUM_TOTAL", [(entity_type, value_b)], csv_path)
+    return result_a, result_b
+
+
+def format_compare_answer(value_a, value_b, result_a, result_b):
+    sum_a, sum_b = result_a["sum"], result_b["sum"]
+
+    if sum_a == sum_b:
+        return (
+            f"{value_a} and {value_b} received the same total: "
+            f"${sum_a:,.2f} each (n={result_a['count']} vs n={result_b['count']})."
+        )
+
+    if sum_a > sum_b:
+        winner, winner_sum, winner_n = value_a, sum_a, result_a["count"]
+        loser, loser_sum, loser_n = value_b, sum_b, result_b["count"]
+    else:
+        winner, winner_sum, winner_n = value_b, sum_b, result_b["count"]
+        loser, loser_sum, loser_n = value_a, sum_a, result_a["count"]
+
+    diff = winner_sum - loser_sum
+    return (
+        f"{winner} received more — ${winner_sum:,.2f} (n={winner_n}) vs "
+        f"{loser}'s ${loser_sum:,.2f} (n={loser_n}), a difference of ${diff:,.2f}."
+    )
 
 
 def format_similarity_answer(entity_type, target_value, results):
@@ -204,40 +313,63 @@ def format_similarity_answer(entity_type, target_value, results):
 def answer(question, csv_path):
     print(f"[Aggregating over: {csv_path}]")
 
-    model, word2idx, intent_encoder, entity_type_encoder, entity_vocab = load_artifacts()
+    model, word2idx, intent_encoder, entity_types, threshold, entity_vocab = load_artifacts()
 
-    intent, entity_type = predict_intent_and_entity_type(
-        question, model, word2idx, intent_encoder, entity_type_encoder
+    intent, predicted_types = predict_intent_and_entity_types(
+        question, model, word2idx, intent_encoder, entity_types, threshold
     )
-    entity_value = extract_entity_value(question, entity_type, entity_vocab)
+    entities = extract_entities(question, predicted_types, entity_vocab)
 
-    print(f"Predicted intent:      {intent}")
-    print(f"Predicted entity type: {entity_type}")
-    print(f"Extracted entity value: {entity_value!r}")
+    print(f"Predicted intent:       {intent}")
+    print(f"Predicted entity types: {predicted_types}")
+    print(f"Extracted entities:     {entities}")
     print()
 
     if intent in SIMILARITY_INTENT_ENTITY_TYPE:
         expected_entity_type = SIMILARITY_INTENT_ENTITY_TYPE[intent]
-        if not entity_value or entity_type != expected_entity_type:
+        target_value = next((v for t, v in entities if t == expected_entity_type), None)
+        if not target_value:
             print(
                 f"Could not identify a target {expected_entity_type.lower()} "
                 f"in the question -- try naming it explicitly."
             )
             return
 
-        results = find_similar(expected_entity_type, entity_value, csv_path)
+        results = find_similar(expected_entity_type, target_value, csv_path)
         if results is None:
             print(
                 f"No payment profile found for {expected_entity_type.lower()}="
-                f"{entity_value!r} (not present in the data, or too few payments)."
+                f"{target_value!r} (not present in the data, or too few payments)."
             )
             return
 
-        print(format_similarity_answer(expected_entity_type, entity_value, results))
+        print(format_similarity_answer(expected_entity_type, target_value, results))
         return
 
-    result = run_aggregation(intent, entity_type, entity_value, csv_path)
-    print(format_answer(intent, entity_type, entity_value, result))
+    if intent in COMPARE_INTENT_ENTITY_TYPE:
+        expected_entity_type = COMPARE_INTENT_ENTITY_TYPE[intent]
+        values = extract_entity_values_multi(question, expected_entity_type, entity_vocab)
+
+        if len(values) < 2:
+            if values:
+                print(
+                    f"Only found one {expected_entity_type.lower()} ({values[0]!r}) in the "
+                    f"question -- need two to compare. Try naming both explicitly."
+                )
+            else:
+                print(
+                    f"Could not identify two {expected_entity_type.lower()}s to compare "
+                    f"in the question -- try naming both explicitly."
+                )
+            return
+
+        value_a, value_b = values[0], values[1]
+        result_a, result_b = run_compare(expected_entity_type, value_a, value_b, csv_path)
+        print(format_compare_answer(value_a, value_b, result_a, result_b))
+        return
+
+    result = run_aggregation(intent, entities, csv_path)
+    print(format_answer(intent, entities, result))
 
 
 def main():
