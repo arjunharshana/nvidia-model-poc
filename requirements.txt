@@ -2,5 +2,6 @@ duckdb
 joblib
 numpy
 scikit-learn
+sentence-transformers
 torch
 torchvision

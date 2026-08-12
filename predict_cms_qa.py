@@ -1,12 +1,12 @@
 import argparse
 import glob
 import os
-import re
 
 import duckdb
 import joblib
 import torch
 
+import entity_matcher
 from similarity import find_similar
 from train_cms_qa import IntentEntityModel, tokenize, encode_question
 
@@ -58,8 +58,7 @@ SIMILARITY_INTENT_ENTITY_TYPE = {
     "SIMILAR_STATES_TO": "STATE",
 }
 
-# COMPARE_BY_* intents: compares two values of the same entity type by total
-# dollar amount (the default/most intuitive metric for "which received more").
+# Compares two values of the same entity type by total dollar amount.
 COMPARE_INTENT_ENTITY_TYPE = {
     "COMPARE_BY_STATE": "STATE",
     "COMPARE_BY_COMPANY": "COMPANY",
@@ -74,7 +73,7 @@ def load_artifacts():
     intent_encoder = joblib.load(INTENT_ENCODER_PATH)
     entity_types = joblib.load(ENTITY_TYPE_ENCODER_PATH)
     entity_type_threshold = checkpoint.get("entity_type_threshold", 0.5)
-    entity_vocab = joblib.load(ENTITY_VOCAB_PATH)
+    matcher_cache = entity_matcher.load_or_build_cache(ENTITY_VOCAB_PATH)
 
     model = IntentEntityModel(
         vocab_size=checkpoint["vocab_size"],
@@ -87,7 +86,7 @@ def load_artifacts():
     model.load_state_dict(checkpoint["model_state_dict"])
     model.eval()
 
-    return model, word2idx, intent_encoder, entity_types, entity_type_threshold, entity_vocab
+    return model, word2idx, intent_encoder, entity_types, entity_type_threshold, matcher_cache
 
 
 def predict_intent_and_entity_types(question, model, word2idx, intent_encoder, entity_types, threshold):
@@ -104,97 +103,28 @@ def predict_intent_and_entity_types(question, model, word2idx, intent_encoder, e
     return intent, predicted_types
 
 
-def extract_entity_value(question, entity_type, entity_vocab):
-    if entity_type == "NONE" or entity_type not in entity_vocab:
+def extract_entity_value(question, entity_type, matcher_cache):
+    if entity_type == "NONE":
         return None
-
-    q_lower = question.lower()
-    candidates = list(entity_vocab[entity_type])
-
-    # Resolve friendly aliases (e.g. "Physician") back to the CMS string.
-    alias_to_canonical = {}
-    if entity_type == "PROVIDER_TYPE":
-        for canonical, alias in entity_vocab.get("PROVIDER_TYPE_ALIASES", {}).items():
-            alias_to_canonical[alias.lower()] = canonical
-            candidates.append(alias)
-
-    best_match = None
-    best_len = -1
-    for candidate in candidates:
-        c_lower = candidate.lower()
-        pattern = r"(?<![a-z0-9])" + re.escape(c_lower) + r"(?![a-z0-9])"
-        if c_lower in alias_to_canonical:
-            pattern = r"(?<![a-z0-9])" + re.escape(c_lower) + r"s?(?![a-z0-9])"
-
-        if entity_type == "STATE" and len(candidate) == 2:
-            # USPS codes collide with common words, so only match uppercase.
-            matched = re.search(r"(?<![A-Za-z0-9])" + re.escape(candidate) + r"(?![A-Za-z0-9])", question)
-        else:
-            matched = re.search(pattern, q_lower)
-
-        if matched and len(c_lower) > best_len:
-            best_match = alias_to_canonical.get(c_lower, candidate)
-            best_len = len(c_lower)
-
-    return best_match
+    labels_by_type, embeddings_by_type = matcher_cache
+    match = entity_matcher.best_match(question, entity_type, labels_by_type, embeddings_by_type)
+    return match[0] if match else None
 
 
-def extract_entities(question, entity_types, entity_vocab):
-    """Resolves each predicted entity_type to a value; drops types that don't
-    match any known vocabulary value in the question text. Returns a list of
-    (entity_type, entity_value) pairs, one per successfully resolved type."""
+def extract_entities(question, entity_types, matcher_cache):
     entities = []
     for entity_type in entity_types:
-        value = extract_entity_value(question, entity_type, entity_vocab)
+        value = extract_entity_value(question, entity_type, matcher_cache)
         if value:
             entities.append((entity_type, value))
     return entities
 
 
-def extract_entity_values_multi(question, entity_type, entity_vocab):
-    """Like extract_entity_value, but returns every distinct matching value
-    of entity_type found in the question (not just the single best match) --
-    used for COMPARE_BY_* questions, which name two values of the same type
-    (e.g. "NY" and "TX", both STATE)."""
-    if entity_type == "NONE" or entity_type not in entity_vocab:
+def extract_entity_values_multi(question, entity_type, matcher_cache):
+    if entity_type == "NONE":
         return []
-
-    q_lower = question.lower()
-    candidates = list(entity_vocab[entity_type])
-
-    alias_to_canonical = {}
-    if entity_type == "PROVIDER_TYPE":
-        for canonical, alias in entity_vocab.get("PROVIDER_TYPE_ALIASES", {}).items():
-            alias_to_canonical[alias.lower()] = canonical
-            candidates.append(alias)
-
-    matches = []
-    for candidate in candidates:
-        c_lower = candidate.lower()
-        pattern = r"(?<![a-z0-9])" + re.escape(c_lower) + r"(?![a-z0-9])"
-        if c_lower in alias_to_canonical:
-            pattern = r"(?<![a-z0-9])" + re.escape(c_lower) + r"s?(?![a-z0-9])"
-
-        if entity_type == "STATE" and len(candidate) == 2:
-            matched = re.search(r"(?<![A-Za-z0-9])" + re.escape(candidate) + r"(?![A-Za-z0-9])", question)
-        else:
-            matched = re.search(pattern, q_lower)
-
-        if matched:
-            resolved = alias_to_canonical.get(c_lower, candidate)
-            matches.append((matched.start(), len(c_lower), resolved))
-
-    # Longer matches first (so a substring alias doesn't shadow a longer
-    # match at the same position), then in the order they appear in the text.
-    matches.sort(key=lambda m: (m[0], -m[1]))
-
-    seen = set()
-    ordered = []
-    for _, _, resolved in matches:
-        if resolved not in seen:
-            seen.add(resolved)
-            ordered.append(resolved)
-    return ordered
+    labels_by_type, embeddings_by_type = matcher_cache
+    return entity_matcher.top_matches(question, entity_type, labels_by_type, embeddings_by_type, top_k=2)
 
 
 def _duckdb_csv_source(csv_path):
@@ -267,10 +197,16 @@ def format_answer(intent, entities, result):
     return str(result)
 
 
+def format_unmatched_entity_answer(unmatched_types):
+    labels = " or a ".join(t.lower() for t in unmatched_types)
+    return (
+        f"Couldn't confidently match a {labels} in this question, so I'm not "
+        f"answering with an unfiltered total (that would be misleading). "
+        f"Try naming it more explicitly."
+    )
+
+
 def run_compare(entity_type, value_a, value_b, csv_path):
-    """Runs the SUM aggregate once per value and returns both results plus
-    which one is higher. Metric is always total dollar amount -- the natural
-    default for a bare "which received more" question."""
     result_a = run_aggregation("SUM_TOTAL", [(entity_type, value_a)], csv_path)
     result_b = run_aggregation("SUM_TOTAL", [(entity_type, value_b)], csv_path)
     return result_a, result_b
@@ -313,12 +249,12 @@ def format_similarity_answer(entity_type, target_value, results):
 def answer(question, csv_path):
     print(f"[Aggregating over: {csv_path}]")
 
-    model, word2idx, intent_encoder, entity_types, threshold, entity_vocab = load_artifacts()
+    model, word2idx, intent_encoder, entity_types, threshold, matcher_cache = load_artifacts()
 
     intent, predicted_types = predict_intent_and_entity_types(
         question, model, word2idx, intent_encoder, entity_types, threshold
     )
-    entities = extract_entities(question, predicted_types, entity_vocab)
+    entities = extract_entities(question, predicted_types, matcher_cache)
 
     print(f"Predicted intent:       {intent}")
     print(f"Predicted entity types: {predicted_types}")
@@ -348,7 +284,7 @@ def answer(question, csv_path):
 
     if intent in COMPARE_INTENT_ENTITY_TYPE:
         expected_entity_type = COMPARE_INTENT_ENTITY_TYPE[intent]
-        values = extract_entity_values_multi(question, expected_entity_type, entity_vocab)
+        values = extract_entity_values_multi(question, expected_entity_type, matcher_cache)
 
         if len(values) < 2:
             if values:
@@ -366,6 +302,12 @@ def answer(question, csv_path):
         value_a, value_b = values[0], values[1]
         result_a, result_b = run_compare(expected_entity_type, value_a, value_b, csv_path)
         print(format_compare_answer(value_a, value_b, result_a, result_b))
+        return
+
+    resolved_types = {t for t, v in entities}
+    unmatched_types = [t for t in predicted_types if t != "NONE" and t not in resolved_types]
+    if unmatched_types:
+        print(format_unmatched_entity_answer(unmatched_types))
         return
 
     result = run_aggregation(intent, entities, csv_path)
